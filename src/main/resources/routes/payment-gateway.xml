@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-3.0.xsd http://activemq.apache.org/schema/core http://activemq.apache.org/schema/core/activemq-core-5.4.0.xsd http://camel.apache.org/schema/spring http://camel.apache.org/schema/spring/camel-spring.xsd">
+	<import resource="classpath:commonBeans.xml" />
+	<camelContext id="paymentGateway" trace="true"
+		xmlns="http://camel.apache.org/schema/spring"
+		xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+
+		<propertyPlaceholder id="properties"
+			location="classpath:config/endpoint.properties, classpath:config/sql.properties" />
+		<onException id="exceptionNotify">
+			<exception>java.lang.NullPointerException</exception>
+			<to uri="direct:validationRequestError" />
+		</onException>
+		<route autoStartup="true" id="readPaymentsFromFolder">
+			<from
+				uri="file:{{payment.incoming}}?antInclude=*.csv&amp;delay=3s&amp;readLock=changed&amp;readLockCheckInterval=5s&amp;readLockMarkerFile=true&amp;move={{payment.done}}&amp;moveFailed={{payment.error}}" />
+			<filter>
+				<simple>${body} != null</simple>
+				<unmarshal>
+					<csv allowMissingColumnNames="true" useMaps="true" trim="true"
+						delimiter="," headerDisabled="true" ignoreEmptyLines="true" />
+				</unmarshal>
+				<split>
+					<simple>${body}</simple>
+					<filter>
+						<simple>${body} != null</simple>
+						<to
+							uri="sql:{{select.existing.payment}}?outputHeader=existingPayment&amp;outputType=SelectOne&amp;transacted=true" />
+						<choice>
+							<when>
+								<simple>${headers.existingPayment} != null</simple>
+								<log
+									message="Attempted inserting dublicate bankreference = ${body['bank_reference']}" />
+							</when>
+							<otherwise>
+								<to
+									uri="sql:{{insert.payments}}?noop=true&amp;transacted=true" />
+							</otherwise>
+						</choice>
+					</filter>
+				</split>
+			</filter>
+		</route>
+		<route autoStartup="true" id="postToQueue">
+			<from uri="sql:{{select.unprocessed.payments}}?transacted=true" />
+			<split>
+				<simple>${body}</simple>
+				<filter>
+					<simple>${body} != null</simple>
+					<to uri="jms:queue:OutFromPaymentGW?transacted=true" />
+					<to uri="sql:{{update.queued.success}}?noop=true" />
+				</filter>
+			</split>
+		</route>
+
+	</camelContext>
+	<bean
+		class="org.apache.camel.component.jetty9.JettyHttpComponent9"
+		id="jetty">
+		<!-- <property name="sslContextParameters" ref="sslContextParameters" /> -->
+	</bean>
+</beans>
